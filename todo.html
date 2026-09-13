@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Study Mate AI — To-do &amp; Timetable</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">Study Mate <span>AI</span></div>
+    <nav>
+      <a href="index.html" class="nav-link">🏠 Dashboard</a>
+      <a href="upload.html" class="nav-link">📄 Upload &amp; Scan</a>
+      <a href="assignment.html" class="nav-link">📝 Assignments</a>
+      <a href="quiz.html" class="nav-link">❓ Quiz</a>
+      <a href="todo.html" class="nav-link active">🗓️ To-do &amp; Timetable</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="userName">Loading…</div>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="page-head">
+      <div>
+        <h1>To-do &amp; timetable</h1>
+        <p>Track assignments and study tasks, and keep a weekly class or revision timetable.</p>
+      </div>
+    </div>
+
+    <div class="grid-2" style="align-items:start;">
+      <div class="card">
+        <h2>To-do list</h2>
+        <form id="todoForm">
+          <label for="todoTitle">Task</label>
+          <input type="text" id="todoTitle" placeholder="e.g. Finish Chemistry assignment" required />
+          <div class="field-row">
+            <div>
+              <label for="todoSubject">Subject</label>
+              <input type="text" id="todoSubject" placeholder="e.g. Chemistry" />
+            </div>
+            <div>
+              <label for="todoDue">Due date</label>
+              <input type="date" id="todoDue" />
+            </div>
+          </div>
+          <button type="submit" class="btn btn-primary">Add to-do</button>
+        </form>
+
+        <div style="margin-top:20px;">
+          <h3>Pending</h3>
+          <div id="pendingList"><div class="empty-state">No pending tasks.</div></div>
+          <h3 style="margin-top:18px;">Completed</h3>
+          <div id="doneList"><div class="empty-state">Nothing completed yet.</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Weekly timetable</h2>
+        <p style="font-size:0.85rem;">Type a subject into each slot. It saves automatically as you move to the next cell.</p>
+        <div style="overflow-x:auto;">
+          <table class="timetable" id="timetable">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Mon</th><th>Tue</th><th>Wed</th><th>Thu</th><th>Fri</th><th>Sat</th>
+              </tr>
+            </thead>
+            <tbody id="timetableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { requireAuth, wireLogout, formatDate, uid, toast } from "./js/utils.js";
+  import { db } from "./js/firebase-config.js";
+  import {
+    collection, addDoc, doc, getDoc, setDoc, updateDoc, deleteDoc,
+    getDocs, query, where, orderBy, serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  wireLogout(document.getElementById("logoutBtn"));
+
+  let currentUser = null;
+  const SLOTS = ["8:00", "9:00", "10:00", "11:00", "12:00", "1:00", "2:00", "3:00", "4:00"];
+  const DAYS = ["mon", "tue", "wed", "thu", "fri", "sat"];
+
+  requireAuth(async (user) => {
+    currentUser = user;
+    document.getElementById("userName").textContent = user.displayName || user.email.split("@")[0];
+    buildTimetableGrid();
+    await loadTimetable();
+    await loadTodos();
+  });
+
+  // ---------- To-do list ----------
+  document.getElementById("todoForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const title = document.getElementById("todoTitle").value.trim();
+    const subject = document.getElementById("todoSubject").value.trim();
+    const dueDate = document.getElementById("todoDue").value;
+    if (!title) return;
+
+    await addDoc(collection(db, "todos"), {
+      uid: currentUser.uid,
+      title,
+      subject,
+      dueDate: dueDate || null,
+      done: false,
+      createdAt: serverTimestamp()
+    });
+    e.target.reset();
+    loadTodos();
+  });
+
+  async function loadTodos() {
+    const q = query(collection(db, "todos"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    const pending = [];
+    const done = [];
+    snap.forEach((d) => {
+      const data = { id: d.id, ...d.data() };
+      (data.done ? done : pending).push(data);
+    });
+
+    renderTodoGroup("pendingList", pending, "No pending tasks.");
+    renderTodoGroup("doneList", done, "Nothing completed yet.");
+  }
+
+  function renderTodoGroup(elId, items, emptyText) {
+    const wrap = document.getElementById(elId);
+    if (items.length === 0) {
+      wrap.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+      return;
+    }
+    wrap.innerHTML = "";
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "list-item";
+      row.innerHTML = `
+        <label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+          <input type="checkbox" ${item.done ? "checked" : ""} style="margin-top:4px;" />
+          <div>
+            <strong style="${item.done ? "text-decoration:line-through; color:var(--ink-soft);" : ""}">${escapeHtml(item.title)}</strong><br>
+            <span class="pill accent">${escapeHtml(item.subject || "General")}</span>
+            ${item.dueDate ? `<span class="pill">${formatDate(item.dueDate)}</span>` : ""}
+          </div>
+        </label>
+        <button class="btn btn-danger" data-id="${item.id}">Delete</button>`;
+      row.querySelector("input[type=checkbox]").addEventListener("change", async (e) => {
+        await updateDoc(doc(db, "todos", item.id), { done: e.target.checked });
+        loadTodos();
+      });
+      row.querySelector("button.btn-danger").addEventListener("click", async () => {
+        await deleteDoc(doc(db, "todos", item.id));
+        loadTodos();
+      });
+      wrap.appendChild(row);
+    });
+  }
+
+  // ---------- Timetable ----------
+  function buildTimetableGrid() {
+    const body = document.getElementById("timetableBody");
+    body.innerHTML = "";
+    SLOTS.forEach((slot) => {
+      const tr = document.createElement("tr");
+      const timeCell = document.createElement("th");
+      timeCell.textContent = slot;
+      tr.appendChild(timeCell);
+      DAYS.forEach((day) => {
+        const td = document.createElement("td");
+        const input = document.createElement("input");
+        input.type = "text";
+        input.dataset.key = `${day}_${slot}`;
+        input.placeholder = "-";
+        input.addEventListener("change", saveTimetable);
+        td.appendChild(input);
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  async function loadTimetable() {
+    const ref = doc(db, "timetables", currentUser.uid);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return;
+    const data = snap.data().slots || {};
+    document.querySelectorAll("#timetableBody input").forEach((input) => {
+      if (data[input.dataset.key]) input.value = data[input.dataset.key];
+    });
+  }
+
+  async function saveTimetable() {
+    const slots = {};
+    document.querySelectorAll("#timetableBody input").forEach((input) => {
+      if (input.value.trim()) slots[input.dataset.key] = input.value.trim();
+    });
+    try {
+      await setDoc(doc(db, "timetables", currentUser.uid), { uid: currentUser.uid, slots, updatedAt: serverTimestamp() });
+      toast("Timetable saved.");
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save timetable.");
+    }
+  }
+
+  function escapeHtml(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>

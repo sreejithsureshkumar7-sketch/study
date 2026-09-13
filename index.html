@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Study Mate AI — Dashboard</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">Study Mate <span>AI</span></div>
+    <nav>
+      <a href="index.html" class="nav-link active">🏠 Dashboard</a>
+      <a href="upload.html" class="nav-link">📄 Upload &amp; Scan</a>
+      <a href="assignment.html" class="nav-link">📝 Assignments</a>
+      <a href="quiz.html" class="nav-link">❓ Quiz</a>
+      <a href="todo.html" class="nav-link">🗓️ To-do &amp; Timetable</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="userName">Loading…</div>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="page-head">
+      <div>
+        <h1>Welcome back<span id="welcomeName"></span></h1>
+        <p>Here's where your study material and to-dos stand.</p>
+      </div>
+      <a href="upload.html" class="btn btn-accent">+ Upload a PDF</a>
+    </div>
+
+    <div class="grid-3" style="margin-bottom:24px;">
+      <div class="card stat">
+        <div class="num" id="statDocs">0</div>
+        <div class="label">PDFs scanned</div>
+      </div>
+      <div class="card stat">
+        <div class="num" id="statQuestions">0</div>
+        <div class="label">Important questions found</div>
+      </div>
+      <div class="card stat">
+        <div class="num" id="statTodos">0</div>
+        <div class="label">Pending to-dos</div>
+      </div>
+    </div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h2>Recent documents</h2>
+        <div id="recentDocs"><div class="empty-state">No PDFs uploaded yet.</div></div>
+      </div>
+      <div class="card">
+        <h2>Today &amp; upcoming</h2>
+        <div id="upcomingTodos"><div class="empty-state">Nothing on your to-do list yet.</div></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { requireAuth, wireLogout, formatDate } from "./js/utils.js";
+  import { db } from "./js/firebase-config.js";
+  import { collection, query, where, orderBy, limit, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  wireLogout(document.getElementById("logoutBtn"));
+
+  requireAuth(async (user) => {
+    const name = user.displayName || user.email.split("@")[0];
+    document.getElementById("userName").textContent = name;
+    document.getElementById("welcomeName").textContent = ", " + name;
+
+    // Documents
+    const docsQ = query(collection(db, "documents"), where("uid", "==", user.uid), orderBy("createdAt", "desc"), limit(5));
+    const docsSnap = await getDocs(docsQ);
+    document.getElementById("statDocs").textContent = docsSnap.size;
+
+    let totalQ = 0;
+    docsSnap.forEach((d) => { totalQ += (d.data().questions || []).length; });
+    document.getElementById("statQuestions").textContent = totalQ;
+
+    if (!docsSnap.empty) {
+      const wrap = document.getElementById("recentDocs");
+      wrap.innerHTML = "";
+      docsSnap.forEach((d) => {
+        const data = d.data();
+        const row = document.createElement("div");
+        row.className = "list-item";
+        row.innerHTML = `<div><strong>${escapeHtml(data.title)}</strong><br>
+          <span class="pill">${(data.questions || []).length} questions</span></div>
+          <a href="assignment.html?doc=${d.id}" class="btn btn-ghost">Use</a>`;
+        wrap.appendChild(row);
+      });
+    }
+
+    // Todos
+    const todosQ = query(collection(db, "todos"), where("uid", "==", user.uid), where("done", "==", false), orderBy("dueDate", "asc"), limit(5));
+    const todosSnap = await getDocs(todosQ);
+    document.getElementById("statTodos").textContent = todosSnap.size;
+
+    if (!todosSnap.empty) {
+      const wrap = document.getElementById("upcomingTodos");
+      wrap.innerHTML = "";
+      todosSnap.forEach((d) => {
+        const data = d.data();
+        const row = document.createElement("div");
+        row.className = "list-item";
+        row.innerHTML = `<div><strong>${escapeHtml(data.title)}</strong><br>
+          <span class="pill accent">${data.subject || "General"}</span></div>
+          <span style="color:var(--ink-soft); font-size:0.85rem;">${data.dueDate ? formatDate(data.dueDate) : ""}</span>`;
+        wrap.appendChild(row);
+      });
+    }
+  });
+
+  function escapeHtml(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>

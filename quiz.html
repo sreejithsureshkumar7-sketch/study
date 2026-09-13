@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Study Mate AI — Quiz</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">Study Mate <span>AI</span></div>
+    <nav>
+      <a href="index.html" class="nav-link">🏠 Dashboard</a>
+      <a href="upload.html" class="nav-link">📄 Upload &amp; Scan</a>
+      <a href="assignment.html" class="nav-link">📝 Assignments</a>
+      <a href="quiz.html" class="nav-link active">❓ Quiz</a>
+      <a href="todo.html" class="nav-link">🗓️ To-do &amp; Timetable</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="userName">Loading…</div>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="page-head">
+      <div>
+        <h1>Quiz yourself</h1>
+        <p>We turn the important questions from your document into a self-check quiz: read the question, recall the answer, then mark yourself honestly.</p>
+      </div>
+    </div>
+
+    <div class="card" id="setupCard" style="margin-bottom:24px;">
+      <div class="field-row">
+        <div>
+          <label for="docSelect">Document</label>
+          <select id="docSelect"></select>
+        </div>
+        <div>
+          <label for="countSelect">Number of questions</label>
+          <select id="countSelect">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="15">15</option>
+            <option value="9999">All</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-primary" id="startBtn">Start quiz</button>
+    </div>
+
+    <div class="card" id="quizCard" style="display:none;">
+      <div class="page-head" style="margin-bottom:10px;">
+        <span class="pill" id="progressPill">Question 1 of 10</span>
+        <span class="pill accent" id="scorePill">Score: 0</span>
+      </div>
+      <div class="qcard" id="qCard"></div>
+      <p style="text-align:center; font-size:0.85rem; margin-top:10px;">Tap the card to reveal — this is a self-check quiz, not auto-graded.</p>
+      <div style="display:flex; justify-content:center; gap:12px; margin-top:14px;" id="markButtons">
+        <button class="btn btn-ghost" id="knewItBtn" style="display:none;">✅ I knew it</button>
+        <button class="btn btn-danger" id="missedItBtn" style="display:none;">❌ I missed it</button>
+      </div>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none; text-align:center;">
+      <h2>Quiz complete</h2>
+      <p id="finalScoreText"></p>
+      <button class="btn btn-primary" id="retryBtn">Take another quiz</button>
+    </div>
+
+    <div class="card" id="historyCard" style="margin-top:24px;">
+      <h2>Past attempts</h2>
+      <div id="historyList"><div class="empty-state">Your quiz history will show up here.</div></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { requireAuth, wireLogout, formatDate, toast } from "./js/utils.js";
+  import { db } from "./js/firebase-config.js";
+  import { collection, addDoc, getDocs, query, where, orderBy, limit, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  wireLogout(document.getElementById("logoutBtn"));
+
+  let currentUser = null;
+  let documents = [];
+  let quizQuestions = [];
+  let idx = 0;
+  let knew = 0;
+  let missed = 0;
+  let revealed = false;
+  let activeDocTitle = "";
+
+  const params = new URLSearchParams(window.location.search);
+  const presetDocId = params.get("doc");
+
+  requireAuth(async (user) => {
+    currentUser = user;
+    document.getElementById("userName").textContent = user.displayName || user.email.split("@")[0];
+    await loadDocuments();
+    loadHistory();
+  });
+
+  async function loadDocuments() {
+    const q = query(collection(db, "documents"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    documents = [];
+    snap.forEach((d) => documents.push({ id: d.id, ...d.data() }));
+    const docSelect = document.getElementById("docSelect");
+    docSelect.innerHTML = "";
+    if (documents.length === 0) {
+      docSelect.innerHTML = '<option value="">No documents yet — upload one first</option>';
+      return;
+    }
+    documents.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = `${d.title} (${(d.questions || []).length} questions)`;
+      docSelect.appendChild(opt);
+    });
+    if (presetDocId && documents.find((d) => d.id === presetDocId)) docSelect.value = presetDocId;
+  }
+
+  document.getElementById("startBtn").addEventListener("click", () => {
+    const docId = document.getElementById("docSelect").value;
+    const chosen = documents.find((d) => d.id === docId);
+    if (!chosen || !(chosen.questions || []).length) {
+      toast("This document has no scanned questions yet.");
+      return;
+    }
+    activeDocTitle = chosen.title;
+    const count = parseInt(document.getElementById("countSelect").value, 10);
+    quizQuestions = shuffle([...chosen.questions]).slice(0, count);
+    idx = 0; knew = 0; missed = 0;
+
+    document.getElementById("setupCard").style.display = "none";
+    document.getElementById("quizCard").style.display = "block";
+    document.getElementById("resultCard").style.display = "none";
+    showQuestion();
+  });
+
+  function shuffle(arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  function showQuestion() {
+    revealed = false;
+    document.getElementById("progressPill").textContent = `Question ${idx + 1} of ${quizQuestions.length}`;
+    document.getElementById("scorePill").textContent = `Score: ${knew}`;
+    document.getElementById("qCard").textContent = quizQuestions[idx];
+    document.getElementById("knewItBtn").style.display = "none";
+    document.getElementById("missedItBtn").style.display = "none";
+  }
+
+  document.getElementById("qCard").addEventListener("click", () => {
+    if (revealed) return;
+    revealed = true;
+    document.getElementById("qCard").innerHTML =
+      `<div><strong>${escapeHtml(quizQuestions[idx])}</strong><br><br>
+       <span style="font-size:0.9rem; color:var(--ink-soft); font-family:var(--font-body);">Now recall your answer out loud or on paper, then mark yourself below.</span></div>`;
+    document.getElementById("knewItBtn").style.display = "inline-flex";
+    document.getElementById("missedItBtn").style.display = "inline-flex";
+  });
+
+  document.getElementById("knewItBtn").addEventListener("click", () => { knew++; nextQuestion(); });
+  document.getElementById("missedItBtn").addEventListener("click", () => { missed++; nextQuestion(); });
+
+  function nextQuestion() {
+    idx++;
+    if (idx >= quizQuestions.length) {
+      finishQuiz();
+    } else {
+      showQuestion();
+    }
+  }
+
+  async function finishQuiz() {
+    document.getElementById("quizCard").style.display = "none";
+    document.getElementById("resultCard").style.display = "block";
+    document.getElementById("finalScoreText").textContent =
+      `You knew ${knew} out of ${quizQuestions.length} (${Math.round((knew / quizQuestions.length) * 100)}%).`;
+
+    try {
+      await addDoc(collection(db, "quizResults"), {
+        uid: currentUser.uid,
+        docTitle: activeDocTitle,
+        total: quizQuestions.length,
+        knew,
+        missed,
+        createdAt: serverTimestamp()
+      });
+      loadHistory();
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  document.getElementById("retryBtn").addEventListener("click", () => {
+    document.getElementById("resultCard").style.display = "none";
+    document.getElementById("setupCard").style.display = "block";
+  });
+
+  async function loadHistory() {
+    const wrap = document.getElementById("historyList");
+    const q = query(collection(db, "quizResults"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"), limit(10));
+    const snap = await getDocs(q);
+    if (snap.empty) {
+      wrap.innerHTML = '<div class="empty-state">Your quiz history will show up here.</div>';
+      return;
+    }
+    wrap.innerHTML = "";
+    snap.forEach((d) => {
+      const data = d.data();
+      const pct = Math.round((data.knew / data.total) * 100);
+      const row = document.createElement("div");
+      row.className = "list-item";
+      row.innerHTML = `<div><strong>${escapeHtml(data.docTitle)}</strong><br>
+        <span class="pill">${data.knew}/${data.total} correct (${pct}%)</span></div>
+        <span style="color:var(--ink-soft); font-size:0.85rem;">${data.createdAt ? formatDate(data.createdAt.toDate()) : ""}</span>`;
+      wrap.appendChild(row);
+    });
+  }
+
+  function escapeHtml(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Study Mate AI — Assignments</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">Study Mate <span>AI</span></div>
+    <nav>
+      <a href="index.html" class="nav-link">🏠 Dashboard</a>
+      <a href="upload.html" class="nav-link">📄 Upload &amp; Scan</a>
+      <a href="assignment.html" class="nav-link active">📝 Assignments</a>
+      <a href="quiz.html" class="nav-link">❓ Quiz</a>
+      <a href="todo.html" class="nav-link">🗓️ To-do &amp; Timetable</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="userName">Loading…</div>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="page-head">
+      <div>
+        <h1>Build an assignment</h1>
+        <p>Pick a scanned document and a topic — Study Mate pulls the matching questions and passages straight out of it.</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:24px;">
+      <div class="field-row">
+        <div>
+          <label for="docSelect">Document</label>
+          <select id="docSelect"></select>
+        </div>
+        <div>
+          <label for="topicSelect">Topic</label>
+          <select id="topicSelect"></select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div>
+          <label for="customTopic">Or type your own topic keyword</label>
+          <input type="text" id="customTopic" placeholder="e.g. photosynthesis" />
+        </div>
+      </div>
+      <button class="btn btn-primary" id="generateBtn">Generate assignment</button>
+    </div>
+
+    <div class="card" id="outputCard" style="display:none;">
+      <div class="page-head" style="margin-bottom:14px;">
+        <div>
+          <h2 id="outTitle">Assignment</h2>
+          <p id="outMeta" style="margin:0;"></p>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn btn-ghost" id="downloadBtn">Download .txt</button>
+          <button class="btn btn-primary" id="saveAssignmentBtn">Save</button>
+        </div>
+      </div>
+
+      <h3>Questions to answer</h3>
+      <div id="outQuestions"></div>
+
+      <h3 style="margin-top:22px;">Reference content from the document</h3>
+      <div id="outContent"></div>
+    </div>
+
+    <div class="card" id="savedCard" style="margin-top:24px;">
+      <h2>Saved assignments</h2>
+      <div id="savedList"><div class="empty-state">Assignments you save will show up here.</div></div>
+    </div>
+  </main>
+</div>
+
+<script type="module">
+  import { requireAuth, wireLogout, extractTopics, extractContentForTopic, toast } from "./js/utils.js";
+  import { db } from "./js/firebase-config.js";
+  import { collection, addDoc, doc, getDoc, getDocs, query, where, orderBy, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  wireLogout(document.getElementById("logoutBtn"));
+
+  let currentUser = null;
+  let documents = [];
+  let currentDoc = null;
+  let currentAssignment = null;
+
+  const params = new URLSearchParams(window.location.search);
+  const presetDocId = params.get("doc");
+
+  requireAuth(async (user) => {
+    currentUser = user;
+    document.getElementById("userName").textContent = user.displayName || user.email.split("@")[0];
+    await loadDocuments();
+    loadSaved();
+  });
+
+  async function loadDocuments() {
+    const q = query(collection(db, "documents"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    documents = [];
+    snap.forEach((d) => documents.push({ id: d.id, ...d.data() }));
+
+    const docSelect = document.getElementById("docSelect");
+    docSelect.innerHTML = "";
+    if (documents.length === 0) {
+      docSelect.innerHTML = '<option value="">No documents yet — upload one first</option>';
+      return;
+    }
+    documents.forEach((d) => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = d.title;
+      docSelect.appendChild(opt);
+    });
+    docSelect.value = presetDocId && documents.find((d) => d.id === presetDocId) ? presetDocId : documents[0].id;
+    updateTopics();
+  }
+
+  document.getElementById("docSelect").addEventListener("change", updateTopics);
+
+  function updateTopics() {
+    const docId = document.getElementById("docSelect").value;
+    currentDoc = documents.find((d) => d.id === docId) || null;
+    const topicSelect = document.getElementById("topicSelect");
+    topicSelect.innerHTML = "";
+    if (!currentDoc) return;
+    const topics = extractTopics(currentDoc.fullText, 12);
+    topics.forEach((t) => {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      topicSelect.appendChild(opt);
+    });
+  }
+
+  document.getElementById("generateBtn").addEventListener("click", () => {
+    if (!currentDoc) { toast("Upload a document first."); return; }
+    const custom = document.getElementById("customTopic").value.trim();
+    const topic = custom || document.getElementById("topicSelect").value;
+    if (!topic) { toast("Pick or type a topic."); return; }
+
+    const matchedQuestions = (currentDoc.questions || []).filter((q) =>
+      q.toLowerCase().includes(topic.toLowerCase())
+    );
+    const fallbackQuestions = matchedQuestions.length ? matchedQuestions : (currentDoc.questions || []).slice(0, 8);
+    const content = extractContentForTopic(currentDoc.fullText, topic, 8);
+
+    currentAssignment = {
+      title: `${topic} — Assignment`,
+      topic,
+      docTitle: currentDoc.title,
+      questions: fallbackQuestions,
+      content
+    };
+    renderAssignment();
+  });
+
+  function renderAssignment() {
+    document.getElementById("outputCard").style.display = "block";
+    document.getElementById("outTitle").textContent = currentAssignment.title;
+    document.getElementById("outMeta").textContent = `From "${currentAssignment.docTitle}"`;
+
+    const qWrap = document.getElementById("outQuestions");
+    qWrap.innerHTML = "";
+    if (currentAssignment.questions.length === 0) {
+      qWrap.innerHTML = '<div class="empty-state">No matching questions found for this topic — try a different keyword.</div>';
+    } else {
+      currentAssignment.questions.forEach((q, i) => {
+        const row = document.createElement("div");
+        row.className = "list-item";
+        row.innerHTML = `<div><span class="pill">${i + 1}</span> ${escapeHtml(q)}</div>`;
+        qWrap.appendChild(row);
+      });
+    }
+
+    const cWrap = document.getElementById("outContent");
+    cWrap.innerHTML = "";
+    if (currentAssignment.content.length === 0) {
+      cWrap.innerHTML = '<div class="empty-state">No matching passages found in the document text.</div>';
+    } else {
+      currentAssignment.content.forEach((c) => {
+        const p = document.createElement("p");
+        p.textContent = c;
+        cWrap.appendChild(p);
+      });
+    }
+  }
+
+  document.getElementById("downloadBtn").addEventListener("click", () => {
+    if (!currentAssignment) return;
+    const lines = [
+      currentAssignment.title,
+      `Source: ${currentAssignment.docTitle}`,
+      "",
+      "Questions to answer:",
+      ...currentAssignment.questions.map((q, i) => `${i + 1}. ${q}`),
+      "",
+      "Reference content:",
+      ...currentAssignment.content
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${currentAssignment.title}.txt`;
+    a.click();
+  });
+
+  document.getElementById("saveAssignmentBtn").addEventListener("click", async () => {
+    if (!currentAssignment || !currentUser) return;
+    try {
+      await addDoc(collection(db, "assignments"), {
+        uid: currentUser.uid,
+        ...currentAssignment,
+        createdAt: serverTimestamp()
+      });
+      toast("Assignment saved.");
+      loadSaved();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save assignment.");
+    }
+  });
+
+  async function loadSaved() {
+    const wrap = document.getElementById("savedList");
+    const q = query(collection(db, "assignments"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    if (snap.empty) {
+      wrap.innerHTML = '<div class="empty-state">Assignments you save will show up here.</div>';
+      return;
+    }
+    wrap.innerHTML = "";
+    snap.forEach((d) => {
+      const data = d.data();
+      const row = document.createElement("div");
+      row.className = "list-item";
+      row.innerHTML = `<div><strong>${escapeHtml(data.title)}</strong><br>
+        <span class="pill">${(data.questions || []).length} questions</span></div>
+        <button class="btn btn-danger" data-id="${d.id}">Delete</button>`;
+      row.querySelector("button").addEventListener("click", async () => {
+        if (confirm("Delete this assignment?")) {
+          await deleteDoc(doc(db, "assignments", d.id));
+          loadSaved();
+        }
+      });
+      wrap.appendChild(row);
+    });
+  }
+
+  function escapeHtml(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>

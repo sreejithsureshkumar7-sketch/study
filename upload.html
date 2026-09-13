@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Study Mate AI — Upload &amp; Scan</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">Study Mate <span>AI</span></div>
+    <nav>
+      <a href="index.html" class="nav-link">🏠 Dashboard</a>
+      <a href="upload.html" class="nav-link active">📄 Upload &amp; Scan</a>
+      <a href="assignment.html" class="nav-link">📝 Assignments</a>
+      <a href="quiz.html" class="nav-link">❓ Quiz</a>
+      <a href="todo.html" class="nav-link">🗓️ To-do &amp; Timetable</a>
+    </nav>
+    <div class="sidebar-footer">
+      <div id="userName">Loading…</div>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="page-head">
+      <div>
+        <h1>Upload &amp; scan a PDF</h1>
+        <p>We read the text in your PDF and pick out the lines that look like exam questions or important points — no external AI needed.</p>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:24px;">
+      <div class="upload-drop" id="dropZone">
+        <p style="margin:0 0 6px; font-weight:600; color:var(--ink);">Drop a PDF here, or click to choose a file</p>
+        <p style="margin:0; font-size:0.85rem;">Text-based PDFs work best (scanned image-only PDFs may return little text)</p>
+        <input type="file" id="fileInput" accept="application/pdf" style="display:none;" />
+      </div>
+      <div class="progress-bar" id="progressWrap" style="display:none;"><div id="progressBar"></div></div>
+      <div id="statusText" style="font-size:0.9rem; color:var(--ink-soft); margin-top:8px;"></div>
+    </div>
+
+    <div class="card" id="resultCard" style="display:none;">
+      <div class="page-head" style="margin-bottom:14px;">
+        <div>
+          <h2 id="resultTitle">Scan results</h2>
+          <p id="resultMeta" style="margin:0;"></p>
+        </div>
+        <div style="display:flex; gap:10px;">
+          <button class="btn btn-ghost" id="renameBtn">Rename</button>
+          <button class="btn btn-primary" id="saveBtn">Save to my library</button>
+        </div>
+      </div>
+      <div id="questionsList"></div>
+    </div>
+
+    <div class="card" id="libraryCard" style="margin-top:24px;">
+      <h2>My library</h2>
+      <div id="libraryList"><div class="empty-state">Documents you save will show up here.</div></div>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script type="module">
+  import { requireAuth, wireLogout, extractImportantQuestions, toast } from "./js/utils.js";
+  import { db } from "./js/firebase-config.js";
+  import { collection, addDoc, query, where, orderBy, getDocs, serverTimestamp, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+  wireLogout(document.getElementById("logoutBtn"));
+
+  let currentUser = null;
+  let currentResult = null; // { title, fullText, questions }
+
+  requireAuth((user) => {
+    currentUser = user;
+    document.getElementById("userName").textContent = user.displayName || user.email.split("@")[0];
+    loadLibrary();
+  });
+
+  const dropZone = document.getElementById("dropZone");
+  const fileInput = document.getElementById("fileInput");
+
+  dropZone.addEventListener("click", () => fileInput.click());
+  dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+  dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+  dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    dropZone.classList.remove("dragover");
+    if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files[0]) handleFile(fileInput.files[0]);
+  });
+
+  async function handleFile(file) {
+    if (file.type !== "application/pdf") {
+      toast("Please choose a PDF file.");
+      return;
+    }
+    const progressWrap = document.getElementById("progressWrap");
+    const progressBar = document.getElementById("progressBar");
+    const statusText = document.getElementById("statusText");
+    progressWrap.style.display = "block";
+    progressBar.style.width = "10%";
+    statusText.textContent = "Reading PDF…";
+
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      let fullText = "";
+
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const content = await page.getTextContent();
+        const pageText = content.items.map((item) => item.str).join(" ");
+        fullText += pageText + "\n";
+        progressBar.style.width = `${10 + Math.round((i / pdf.numPages) * 70)}%`;
+        statusText.textContent = `Reading page ${i} of ${pdf.numPages}…`;
+      }
+
+      statusText.textContent = "Scanning for important questions…";
+      progressBar.style.width = "90%";
+      const questions = extractImportantQuestions(fullText, 50);
+
+      progressBar.style.width = "100%";
+      statusText.textContent = `Done — found ${questions.length} important lines across ${pdf.numPages} page(s).`;
+
+      currentResult = {
+        title: file.name.replace(/\.pdf$/i, ""),
+        fullText,
+        questions: questions.map((q) => q.text)
+      };
+      renderResult();
+    } catch (err) {
+      console.error(err);
+      statusText.textContent = "Couldn't read that PDF. It may be image-only/scanned.";
+      progressBar.style.width = "0%";
+    }
+  }
+
+  function renderResult() {
+    document.getElementById("resultCard").style.display = "block";
+    document.getElementById("resultTitle").textContent = currentResult.title;
+    document.getElementById("resultMeta").textContent = `${currentResult.questions.length} important questions found`;
+    const list = document.getElementById("questionsList");
+    list.innerHTML = "";
+    if (currentResult.questions.length === 0) {
+      list.innerHTML = '<div class="empty-state">No clear question patterns found — try a PDF with numbered questions or a "?" in each line.</div>';
+      return;
+    }
+    currentResult.questions.forEach((q, i) => {
+      const row = document.createElement("div");
+      row.className = "list-item";
+      row.innerHTML = `<div><span class="pill">${i + 1}</span> ${escapeHtml(q)}</div>`;
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById("renameBtn").addEventListener("click", () => {
+    const name = prompt("Document title:", currentResult.title);
+    if (name) {
+      currentResult.title = name;
+      document.getElementById("resultTitle").textContent = name;
+    }
+  });
+
+  document.getElementById("saveBtn").addEventListener("click", async () => {
+    if (!currentResult || !currentUser) return;
+    const btn = document.getElementById("saveBtn");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      await addDoc(collection(db, "documents"), {
+        uid: currentUser.uid,
+        title: currentResult.title,
+        fullText: currentResult.fullText.slice(0, 200000), // keep Firestore docs within size limits
+        questions: currentResult.questions,
+        createdAt: serverTimestamp()
+      });
+      toast("Saved to your library.");
+      loadLibrary();
+    } catch (err) {
+      console.error(err);
+      toast("Couldn't save — check your Firebase setup.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Save to my library";
+    }
+  });
+
+  async function loadLibrary() {
+    const wrap = document.getElementById("libraryList");
+    const q = query(collection(db, "documents"), where("uid", "==", currentUser.uid), orderBy("createdAt", "desc"));
+    const snap = await getDocs(q);
+    if (snap.empty) {
+      wrap.innerHTML = '<div class="empty-state">Documents you save will show up here.</div>';
+      return;
+    }
+    wrap.innerHTML = "";
+    snap.forEach((d) => {
+      const data = d.data();
+      const row = document.createElement("div");
+      row.className = "list-item";
+      row.innerHTML = `<div><strong>${escapeHtml(data.title)}</strong><br>
+        <span class="pill">${(data.questions || []).length} questions</span></div>
+        <div style="display:flex; gap:8px;">
+          <a class="btn btn-ghost" href="assignment.html?doc=${d.id}">Assignment</a>
+          <a class="btn btn-ghost" href="quiz.html?doc=${d.id}">Quiz</a>
+          <button class="btn btn-danger" data-id="${d.id}">Delete</button>
+        </div>`;
+      row.querySelector("button.btn-danger").addEventListener("click", async () => {
+        if (confirm("Delete this document?")) {
+          await deleteDoc(doc(db, "documents", d.id));
+          loadLibrary();
+        }
+      });
+      wrap.appendChild(row);
+    });
+  }
+
+  function escapeHtml(str) {
+    return String(str || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+</script>
+</body>
+</html>
